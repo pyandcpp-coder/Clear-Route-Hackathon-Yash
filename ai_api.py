@@ -44,7 +44,7 @@ if not GROQ_API_KEY:
     print("⚠️ WARNING: GROQ_API_KEY not found in environment variables. Using dummy key!")
     GROQ_API_KEY = "dummy_key_for_testing"
 
-LLM_MODEL_NAME = "llama3-70b-8192" # Sticking with Llama3-70B for now as it's a known good model on Groq
+LLM_MODEL_NAME = "llama-3.3-70b-versatile" # Sticking with Llama3-70B for now as it's a known good model on Groq
 llm_temperature = 0.7 # Good balance for generation and consistency
 
 # --- Custom Tools for LangChain ---
@@ -745,7 +745,7 @@ async def strategic_decision_node(state: RaceBrainState):
             raw_llm_response_content = generate_fallback_strategy(user_query, latest_telemetry, anomaly_report, performance_metrics)
             response = AIMessage(content=raw_llm_response_content)
         else: # LLM is available
-            llm_response = await llm_with_tools.ainvoke(strategy_prompt.format_messages(
+            llm_response = await llm.ainvoke(strategy_prompt.format_messages(
                 user_query_val=user_query,
                 session_time_val=race_context_data["session_time"],
                 current_lap_val=race_context_data["current_lap"],

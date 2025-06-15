@@ -24,7 +24,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise ValueError("GROQ_API_KEY not found in environment variables. Please set it in a .env file.")
 
-LLM_MODEL_NAME = "deepseek-r1-distill-llama-70b" 
+LLM_MODEL_NAME = "gemma2-9b-it" 
 llm_temperature = 0.3  
 
 
