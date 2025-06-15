@@ -1518,62 +1518,6 @@ with st.container(): # Using st.container() instead of a placeholder allows dire
     # Tab 6: Race Control
     with tab6:
         st.subheader("🏆 RACE CONTROL CENTER")
-        st.subheader("🎯 STRATEGY INSIGHTS")
-        
-        sim_strategy = race_control_data.get('strategy', {})
-        if sim_strategy:
-            col_strat1, col_strat2, col_strat3 = st.columns(3)
-            
-            with col_strat1:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; opacity: 0.8;">Current Strategy</div>
-                        <div style="font-size: 1.5rem; font-weight: 700;">{sim_strategy.get('current_strategy', 'N/A').title()}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            with col_strat2:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; opacity: 0.8;">Fuel Target Laps</div>
-                        <div style="font-size: 1.5rem; font-weight: 700;">{sim_strategy.get('fuel_target_laps', 'N/A')}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            with col_strat3:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; opacity: 0.8;">Next Pit Recommendation</div>
-                        <div style="font-size: 1.5rem; font-weight: 700;">{sim_strategy.get('next_pit_recommendation', 'N/A')}</div>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            col_strat4, col_strat5 = st.columns(2)
-            
-            with col_strat4:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; opacity: 0.8;">Tire Change Recommended</div>
-                        <div style="font-size: 1.5rem; font-weight: 700; color: {'#4CAF50' if sim_strategy.get('tire_change_recommended', False) else '#F44336'}">
-                            {'Yes' if sim_strategy.get('tire_change_recommended', False) else 'No'}
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
-            
-            with col_strat5:
-                st.markdown(f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; opacity: 0.8;">Driver Change Due</div>
-                        <div style="font-size: 1.5rem; font-weight: 700; color: {'#F44336' if sim_strategy.get('driver_change_due', False) else '#4CAF50'}">
-                            {'Yes' if sim_strategy.get('driver_change_due', False) else 'No'}
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No strategy insights available from simulator.")
-        
-        # Performance Insights (using actual history from simulator)
-        st.markdown("---")
         
         # Race Status Overview (using data from generate_race_control_data_mock, which takes live_data)
         race_col1, race_col2 = st.columns(2)
@@ -1704,7 +1648,62 @@ with st.container(): # Using st.container() instead of a placeholder allows dire
         
         # Strategy Insights (from mock data, incorporating live sim strategy)
         st.markdown("---")
+        st.subheader("🎯 STRATEGY INSIGHTS")
         
+        sim_strategy = race_control_data.get('strategy', {})
+        if sim_strategy:
+            col_strat1, col_strat2, col_strat3 = st.columns(3)
+            
+            with col_strat1:
+                st.markdown(f"""
+                    <div class="metric-card">
+                        <div style="font-size: 0.9rem; opacity: 0.8;">Current Strategy</div>
+                        <div style="font-size: 1.5rem; font-weight: 700;">{sim_strategy.get('current_strategy', 'N/A').title()}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            with col_strat2:
+                st.markdown(f"""
+                    <div class="metric-card">
+                        <div style="font-size: 0.9rem; opacity: 0.8;">Fuel Target Laps</div>
+                        <div style="font-size: 1.5rem; font-weight: 700;">{sim_strategy.get('fuel_target_laps', 'N/A')}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            with col_strat3:
+                st.markdown(f"""
+                    <div class="metric-card">
+                        <div style="font-size: 0.9rem; opacity: 0.8;">Next Pit Recommendation</div>
+                        <div style="font-size: 1.5rem; font-weight: 700;">{sim_strategy.get('next_pit_recommendation', 'N/A')}</div>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            col_strat4, col_strat5 = st.columns(2)
+            
+            with col_strat4:
+                st.markdown(f"""
+                    <div class="metric-card">
+                        <div style="font-size: 0.9rem; opacity: 0.8;">Tire Change Recommended</div>
+                        <div style="font-size: 1.5rem; font-weight: 700; color: {'#4CAF50' if sim_strategy.get('tire_change_recommended', False) else '#F44336'}">
+                            {'Yes' if sim_strategy.get('tire_change_recommended', False) else 'No'}
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            with col_strat5:
+                st.markdown(f"""
+                    <div class="metric-card">
+                        <div style="font-size: 0.9rem; opacity: 0.8;">Driver Change Due</div>
+                        <div style="font-size: 1.5rem; font-weight: 700; color: {'#F44336' if sim_strategy.get('driver_change_due', False) else '#4CAF50'}">
+                            {'Yes' if sim_strategy.get('driver_change_due', False) else 'No'}
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No strategy insights available from simulator.")
+        
+        # Performance Insights (using actual history from simulator)
+        st.markdown("---")
         st.subheader("📊 CURRENT SESSION PERFORMANCE SUMMARY")
         
         if telemetry_history and len(telemetry_history) > 5:
