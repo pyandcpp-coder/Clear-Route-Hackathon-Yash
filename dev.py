@@ -170,7 +170,6 @@ _initial_simulator_state = {
     "last_simulated_update_time": time.time() # To control simulation speed in Streamlit
 }
 
-# Initialize competitor_positions for the initial state
 for car_id in HYPERCAR_COMPETITORS:
     _initial_simulator_state["competitor_positions"][car_id] = {
         "current_lap": 1,
