@@ -614,7 +614,7 @@ st.markdown('<div class="main-header">🏁 UNITED AUTOSPORTS RACEBRAIN AI PRO �
 # Sidebar
 with st.sidebar:
     st.title("🏎️ Race Control Center")
-    st.image("https://storage.googleapis.com/ecm-prod/assets/1/team/532/united-autosports-black_54567f.png", width=200)
+    st.image("https://upload.wikimedia.org/wikipedia/en/thumb/5/5a/United_Autosports.svg/1200px-United_Autosports.svg.png", width=200)
     st.markdown("---")
     
     # Driver Information Card (dynamic based on simulator or default)
