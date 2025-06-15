@@ -1019,9 +1019,12 @@ def generate_fallback_strategy(user_query: str, latest_telemetry: dict, anomaly_
 # --- Node Functions for LangGraph (adapted from ai_api.py) ---
 async def fetch_and_analyze_data_node(state: RaceBrainState):
     try:
-        latest_data = get_latest_telemetry_tool()
-        history_data = get_telemetry_history_tool({"limit": 50}) # Use 50 for full history
-        metrics = calculate_performance_metrics({"telemetry_data": history_data})
+        # latest_data = get_latest_telemetry_tool()
+        latest_data = await get_latest_telemetry_tool.ainvoke({})
+        # history_data = get_telemetry_history_tool({"limit": 50}) # Use 50 for full history
+        history_data = await get_telemetry_history_tool.ainvoke({"limit": 50})
+        # metrics = calculate_performance_metrics({"telemetry_data": history_data})
+        metrics = calculate_performance_metrics.invoke({"telemetry_data": history_data})
 
         return {
             "latest_telemetry": latest_data,
@@ -1657,7 +1660,8 @@ def get_live_data():
     # Calling this directly triggers a simulation step and updates sim_state
     # This design means the simulation advances *every time Streamlit reruns*.
     # The `sim_speed_factor` controls how much simulated time passes per real-time Streamlit update.
-    data = get_latest_telemetry_tool()
+    # data = get_latest_telemetry_tool()
+    data = asyncio.run(get_latest_telemetry_tool.ainvoke({}))
 
     if data and 'car' in data:
         # Check for driver change to reset stint info
