@@ -398,6 +398,8 @@ def get_telemetry_history_ui(limit=50):
 
 def query_race_brain_ai(user_query: str):
     try:
+        openai.api_key = st.secrets["GROQ_API_KEY"]
+        openai.base_url = "https://api.groq.com/openai/v1"
         response = requests.post(
             f"{AI_API_BASE_URL}/query_race_brain_ai",
             json={"user_input": user_query},
