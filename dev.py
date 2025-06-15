@@ -1,8 +1,4 @@
 import streamlit as st
-import os
-os.environ["STREAMLIT_DEBUG"] = "true"
-import streamlit as st
-import json
 import json
 import time
 import pandas as pd
@@ -16,6 +12,7 @@ from scipy import stats
 import re
 import asyncio # New: For running async LangGraph
 import operator # For LangGraph state
+import collections # New: For collections.deque
 from typing import Literal, TypedDict, Annotated, List, Dict, Any, Optional
 from dataclasses import dataclass
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage, AIMessage
@@ -24,6 +21,10 @@ from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END, START
 from langgraph.prebuilt import ToolNode
 from langchain_groq import ChatGroq
+
+import nest_asyncio
+nest_asyncio.apply() # IMPORTANT: Apply this as early as possible to allow nested asyncio loops
+
 
 # --- Constants from data_simulator.py ---
 TRACK_LENGTH_KM = 13.626
@@ -119,14 +120,13 @@ GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 LLM_MODEL_NAME = "llama-3.3-70b-versatile"
 llm_temperature = 0.7
 
-# --- Simulator State Initialization (new in Streamlit for persistence) ---
-# This dictionary will hold the entire mutable state of the simulator.
+# --- Simulator State Initialization and Reset Logic ---
+# This dictionary holds the mutable state of the simulator.
 # It gets stored in st.session_state and updated across Streamlit reruns.
-# Start at 18h into the race as per your previous `data_simulator.py`'s default start
 _initial_simulator_state = {
     "current_lap": 1,
     "current_lap_time_sec": 0.0,
-    "total_simulated_time_sec": 18 * 3600,
+    "total_simulated_time_sec": 18 * 3600, # Start at 18 hours into the race
     "our_car_fuel": OUR_CAR_CONFIG["fuel_tank_liters"],
     "lap_start_time_simulated": 18 * 3600,
     "last_lap_start_time_simulated": 0.0,
@@ -165,8 +165,8 @@ _initial_simulator_state = {
     "track_limits_warnings": 0,
     "race_incidents": [],
     "competitor_positions": {}, # Will be populated dynamically
-    "active_anomalies": {},
-    "command_queue_sim": [], # Store commands for simulator input
+    "active_anomalies": collections.deque(), # Use deque for active anomalies
+    "command_queue_sim": collections.deque(), # Use deque for command queue
     "last_simulated_update_time": time.time() # To control simulation speed in Streamlit
 }
 
@@ -183,9 +183,31 @@ for car_id in HYPERCAR_COMPETITORS:
         "current_driver_index": 0
     }
 
-# Initialize Streamlit session state
+# --- Streamlit Session State Initialization and Defensive Access ---
+# Ensure telemetry_limit is set before any component tries to access it
+if "telemetry_limit" not in st.session_state:
+    st.session_state.telemetry_limit = 50 # Default value if slider hasn't set it yet
+
+# Initialize `sim_state` and `performance_history` once
 if "sim_state" not in st.session_state:
     st.session_state.sim_state = _initial_simulator_state.copy()
+    # Initialize performance_history as a deque
+    st.session_state.performance_history = collections.deque(maxlen=st.session_state.telemetry_limit)
+    # Populate initial performance history for charts and AI analysis
+    # Use the generate_enhanced_telemetry_sim directly
+    for _ in range(10): # Add 10 initial data points
+        initial_data_point = generate_enhanced_telemetry_sim(st.session_state.sim_state)
+        st.session_state.performance_history.append(initial_data_point)
+
+# Ensure `performance_history` is always a deque and respects `maxlen`
+if not isinstance(st.session_state.performance_history, collections.deque):
+    st.session_state.performance_history = collections.deque(st.session_state.performance_history, maxlen=st.session_state.telemetry_limit)
+elif st.session_state.performance_history.maxlen != st.session_state.telemetry_limit:
+    # If maxlen changes (e.g., via slider), recreate deque
+    st.session_state.performance_history = collections.deque(st.session_state.performance_history, maxlen=st.session_state.telemetry_limit)
+
+
+# Initialize other Streamlit session state variables
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "ai_response_cache" not in st.session_state:
@@ -199,11 +221,10 @@ if "ai_query_input_value" not in st.session_state:
     st.session_state.ai_query_input_value = ""
 if "ai_query_submitted" not in st.session_state:
     st.session_state.ai_query_submitted = False
-if "performance_history" not in st.session_state:
-    st.session_state.performance_history = []
 if "prev_position" not in st.session_state:
     st.session_state.prev_position = None
 if "selected_driver" not in st.session_state:
+    # Use the driver from the initial simulator state
     st.session_state.selected_driver = OUR_CAR_CONFIG["drivers"][_initial_simulator_state["current_driver_idx"]]
 if "driver_stint_start" not in st.session_state:
     st.session_state.driver_stint_start = time.time()
@@ -345,14 +366,21 @@ def activate_anomaly_sim(sim_state_dict: dict, anomaly_id: str, duration: int, m
         # Reset to initial state
         sim_state_dict.clear() # Clear existing state
         sim_state_dict.update(_initial_simulator_state.copy()) # Update with a fresh copy
+        # Also re-initialize performance history after a full reset
+        st.session_state.performance_history = collections.deque(maxlen=st.session_state.telemetry_limit)
+        for _ in range(10): # Add 10 initial data points
+            initial_data_point = generate_enhanced_telemetry_sim(sim_state_dict) # Pass updated sim_state_dict
+            st.session_state.performance_history.append(initial_data_point)
         return
 
     end_time = sim_state_dict["total_simulated_time_sec"] + duration if duration > 0 else 0
-    sim_state_dict["active_anomalies"][anomaly_id] = {
+    # Store directly in active_anomalies deque, managing its size if needed or just appending
+    sim_state_dict["active_anomalies"].append({ # Append to deque
+        "id": anomaly_id, # Store ID
         "start_time": sim_state_dict["total_simulated_time_sec"],
         "end_time": end_time,
         "message": message
-    }
+    })
 
     # Apply effects
     if anomaly_config["type"] == "tire_puncture_front_left":
@@ -401,54 +429,58 @@ def activate_anomaly_sim(sim_state_dict: dict, anomaly_id: str, duration: int, m
         sim_state_dict["visibility"] = 0.30
 
 def update_anomalies_sim(sim_state_dict: dict):
-    expired_anomalies = []
-    for anomaly_type_id, anomaly_data in sim_state_dict["active_anomalies"].items():
+    # Iterate through a copy as we might modify the original deque
+    active_anomalies_copy = list(sim_state_dict["active_anomalies"])
+    
+    for anomaly_data in active_anomalies_copy:
+        anomaly_id = anomaly_data["id"] # Retrieve ID
+        
         if anomaly_data.get("end_time", 0) > 0 and sim_state_dict["total_simulated_time_sec"] >= anomaly_data["end_time"]:
-            expired_anomalies.append(anomaly_type_id)
+            # Remove expired anomaly. Deque makes pop_front efficient.
+            # To handle multiple and specific removal, we clear and re-add.
+            sim_state_dict["active_anomalies"].remove(anomaly_data) # Remove this specific item
+            
+            anomaly_config = ENHANCED_ANOMALIES.get(anomaly_id, {})
 
-    for anomaly_type_id in expired_anomalies:
-        anomaly_config = ENHANCED_ANOMALIES.get(anomaly_type_id, {})
-        del sim_state_dict["active_anomalies"][anomaly_type_id]
+            if anomaly_config["type"] == "tire_puncture_front_left":
+                sim_state_dict["tire_wear"]["FL"] = 0.0
+                sim_state_dict["tire_pressures"]["FL"] = INITIAL_TIRE_PRESSURES["FL"]
+                sim_state_dict["tire_temperatures"]["FL"] = INITIAL_TIRE_TEMPS["FL"]
+            elif anomaly_config["type"] == "safety_car_period":
+                sim_state_dict["safety_car_active"] = False
+            elif anomaly_config["type"] == "sudden_weather_change":
+                sim_state_dict["current_weather"] = "clear"
+                sim_state_dict["track_grip"] = 1.0
+                sim_state_dict["visibility"] = 1.0
+            elif anomaly_config["type"] == "engine_overheating":
+                sim_state_dict["oil_temp_C"] = INITIAL_OIL_TEMP
+                sim_state_dict["water_temp_C"] = INITIAL_WATER_TEMP
+            elif anomaly_config["type"] == "brake_balance_issue":
+                sim_state_dict["tire_temperatures"]["FL"] = INITIAL_TIRE_TEMPS["FL"]
+                sim_state_dict["tire_temperatures"]["FR"] = INITIAL_TIRE_TEMPS["FR"]
+                sim_state_dict["tire_temperatures"]["RL"] = INITIAL_TIRE_TEMPS["RL"]
+                sim_state_dict["tire_temperatures"]["RR"] = INITIAL_TIRE_TEMPS["RR"]
 
-        if anomaly_config["type"] == "tire_puncture_front_left":
-            sim_state_dict["tire_wear"]["FL"] = 0.0
-            sim_state_dict["tire_pressures"]["FL"] = INITIAL_TIRE_PRESSURES["FL"]
-            sim_state_dict["tire_temperatures"]["FL"] = INITIAL_TIRE_TEMPS["FL"]
-        elif anomaly_config["type"] == "safety_car_period":
-            sim_state_dict["safety_car_active"] = False
-        elif anomaly_config["type"] == "sudden_weather_change":
-            sim_state_dict["current_weather"] = "clear"
-            sim_state_dict["track_grip"] = 1.0
-            sim_state_dict["visibility"] = 1.0
-        elif anomaly_config["type"] == "engine_overheating":
-            sim_state_dict["oil_temp_C"] = INITIAL_OIL_TEMP
-            sim_state_dict["water_temp_C"] = INITIAL_WATER_TEMP
-        elif anomaly_config["type"] == "brake_balance_issue":
-            sim_state_dict["tire_temperatures"]["FL"] = INITIAL_TIRE_TEMPS["FL"]
-            sim_state_dict["tire_temperatures"]["FR"] = INITIAL_TIRE_TEMPS["FR"]
-            sim_state_dict["tire_temperatures"]["RL"] = INITIAL_TIRE_TEMPS["RL"]
-            sim_state_dict["tire_temperatures"]["RR"] = INITIAL_TIRE_TEMPS["RR"]
+            sim_state_dict["last_speed_kmh"] = random.uniform(200, 250)
+            sim_state_dict["last_throttle_percent"] = random.uniform(60, 80)
+            sim_state_dict["last_brake_percent"] = random.uniform(10, 30)
+            sim_state_dict["last_engine_rpm"] = random.uniform(7000, 9000)
 
-        sim_state_dict["last_speed_kmh"] = random.uniform(200, 250)
-        sim_state_dict["last_throttle_percent"] = random.uniform(60, 80)
-        sim_state_dict["last_brake_percent"] = random.uniform(10, 30)
-        sim_state_dict["last_engine_rpm"] = random.uniform(7000, 9000)
-
-
-def generate_enhanced_telemetry_sim(sim_state_dict: dict):
-    # Simulate real-time factor, advance simulated time based on actual time elapsed
+def generate_enhanced_telemetry_sim(sim_state_dict: dict) -> dict:
+    # Calculate how much simulated time should pass based on real time elapsed
     time_since_last_update = time.time() - sim_state_dict["last_simulated_update_time"]
-    sim_state_dict["total_simulated_time_sec"] += time_since_last_update * st.session_state.get("sim_speed_factor", 30)
-    sim_state_dict["last_simulated_update_time"] = time.time()
+    simulated_time_to_advance = time_since_last_update * st.session_state.get("sim_speed_factor", 30)
+    sim_state_dict["total_simulated_time_sec"] += simulated_time_to_advance
+    sim_state_dict["last_simulated_update_time"] = time.time() # Update for next tick
 
     sim_state_dict["current_lap_time_sec"] = sim_state_dict["total_simulated_time_sec"] - sim_state_dict["lap_start_time_simulated"]
-    sim_state_dict["driver_stint_time"] += (time_since_last_update * st.session_state.get("sim_speed_factor", 30))
+    sim_state_dict["driver_stint_time"] += simulated_time_to_advance
 
     update_weather_system_sim(sim_state_dict)
 
     expected_sector_time = sim_state_dict["our_car_last_lap_time"] / 3 if sim_state_dict["our_car_last_lap_time"] > 0 else (BASE_LAP_TIME_SEC / 3)
     
-    sim_state_dict["sector_progress"] += (time_since_last_update * st.session_state.get("sim_speed_factor", 30))
+    sim_state_dict["sector_progress"] += simulated_time_to_advance
     
     if sim_state_dict["sector_progress"] >= expected_sector_time:
         sim_state_dict["current_sector"] = (sim_state_dict["current_sector"] % 3) + 1
@@ -467,7 +499,8 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
             
             sim_state_dict["our_car_last_lap_time"] = sum(sector_times)
             
-            for anomaly_id in sim_state_dict["active_anomalies"]:
+            for anomaly_data in sim_state_dict["active_anomalies"]:
+                anomaly_id = anomaly_data["id"]
                 anomaly_config = ENHANCED_ANOMALIES.get(anomaly_id)
                 if anomaly_config and "lap_time_impact" in anomaly_config:
                     sim_state_dict["our_car_last_lap_time"] *= anomaly_config["lap_time_impact"]
@@ -511,11 +544,11 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
             sim_state_dict["driver_stint_time"] = 0.0
 
     simulate_competitor_behavior_sim(sim_state_dict)
-    update_anomalies_sim(sim_state_dict)
+    update_anomalies_sim(sim_state_dict) # Update anomalies (effects, expiry)
 
-    # Process commands from Streamlit UI
+    # Process commands from Streamlit UI queue
     while sim_state_dict["command_queue_sim"]:
-        cmd = sim_state_dict["command_queue_sim"].pop(0)
+        cmd = sim_state_dict["command_queue_sim"].popleft() # Use popleft for deque
         if cmd.startswith("anomaly_"):
             anomaly_id = cmd.split("_")[1]
             anomaly_config = ENHANCED_ANOMALIES.get(anomaly_id)
@@ -572,7 +605,8 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
         sim_state_dict["last_speed_kmh"] *= 0.92
         sim_state_dict["last_throttle_percent"] *= 0.95
     
-    for anomaly_id in sim_state_dict["active_anomalies"]:
+    for anomaly_data in sim_state_dict["active_anomalies"]:
+        anomaly_id = anomaly_data["id"]
         anomaly_config = ENHANCED_ANOMALIES.get(anomaly_id)
         if anomaly_config:
             if anomaly_config["type"] == "aerodynamic_damage":
@@ -584,7 +618,13 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
     base_tire_temp_rear = 90.0
 
     for tire_pos in ["FL", "FR", "RL", "RR"]:
-        if not any(f"tire_puncture_{tire_pos.lower()}" == ENHANCED_ANOMALIES[aid]["type"] for aid in sim_state_dict["active_anomalies"]):
+        # Check if an anomaly explicitly targets this tire before applying normal fluctuations
+        is_tire_affected_by_anomaly = any(
+            f"tire_puncture_{tire_pos.lower()}" == ENHANCED_ANOMALIES[ad["id"]]["type"]
+            for ad in sim_state_dict["active_anomalies"]
+        )
+        
+        if not is_tire_affected_by_anomaly:
             current_base_temp = base_tire_temp_front if tire_pos.startswith('F') else base_tire_temp_rear
             temp_modifier = 1.0
             if sim_state_dict["last_brake_percent"] > 50: temp_modifier += 0.1
@@ -595,7 +635,7 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
             temp_modifier += sim_state_dict["tire_wear"][tire_pos] * 0.2
             sim_state_dict["tire_temperatures"][tire_pos] = current_base_temp * temp_modifier + random.uniform(-1, 1)
 
-        if not any(f"tire_puncture_{tire_pos.lower()}" == ENHANCED_ANOMALIES[aid]["type"] for aid in sim_state_dict["active_anomalies"]):
+        if not is_tire_affected_by_anomaly:
             temp_diff = sim_state_dict["tire_temperatures"][tire_pos] - current_base_temp
             pressure_change = temp_diff * 0.01
             base_pressure = INITIAL_TIRE_PRESSURES[tire_pos]
@@ -608,15 +648,30 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
     
     for tire_pos in ["FL", "FR", "RL", "RR"]:
         travel = base_travel + random.uniform(-3, 3)
-        if any(f"tire_puncture_{tire_pos.lower()}" == ENHANCED_ANOMALIES[aid]["type"] for aid in sim_state_dict["active_anomalies"]):
+        # Check if a specific tire anomaly is active before applying modifier
+        is_tire_affected_by_puncture = any(
+            f"tire_puncture_{tire_pos.lower()}" == ENHANCED_ANOMALIES[ad["id"]]["type"]
+            for ad in sim_state_dict["active_anomalies"]
+        )
+        if is_tire_affected_by_puncture:
             travel *= 1.5
         suspension_travel[f"suspension_travel_{tire_pos}_mm"] = travel
     
-    if "engine_overheating" not in sim_state_dict["active_anomalies"]:
+    # Check if engine/water temps are being forced by an active anomaly
+    is_engine_overheating_active = any(
+        ENHANCED_ANOMALIES[ad["id"]]["type"] == "engine_overheating"
+        for ad in sim_state_dict["active_anomalies"]
+    )
+    if not is_engine_overheating_active:
         sim_state_dict["oil_temp_C"] = INITIAL_OIL_TEMP + (sim_state_dict["last_engine_rpm"] - 7500) * 0.002 + random.uniform(-2, 2)
         sim_state_dict["water_temp_C"] = INITIAL_WATER_TEMP + (sim_state_dict["ambient_temperature"] - 20) * 0.5 + random.uniform(-1, 1)
     
-    if "hybrid_system_failure" not in sim_state_dict["active_anomalies"]:
+    # Check if hybrid system is failed
+    is_hybrid_failure_active = any(
+        ENHANCED_ANOMALIES[ad["id"]]["type"] == "hybrid_system_failure"
+        for ad in sim_state_dict["active_anomalies"]
+    )
+    if not is_hybrid_failure_active:
         sim_state_dict["hybrid_battery_percent"] = random.uniform(70, 100)
         sim_state_dict["hybrid_power_kw"] = 0
         if sim_state_dict["last_throttle_percent"] > 70 and sim_state_dict["hybrid_battery_percent"] > 20:
@@ -760,14 +815,14 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
             "track_status": "green" if not sim_state_dict["safety_car_active"] and not sim_state_dict["yellow_flag_sectors"] else "caution"
         },
         "competitors": competitor_data,
-        "active_anomalies": [
+        "active_anomalies": [ # List of active anomaly descriptions
             {
-                "type": ENHANCED_ANOMALIES[anomaly_id]["type"],
-                "message": ENHANCED_ANOMALIES[anomaly_id]["message"],
-                "severity": ENHANCED_ANOMALIES[anomaly_id]["severity"],
+                "type": ENHANCED_ANOMALIES[anomaly_data["id"]]["type"],
+                "message": ENHANCED_ANOMALIES[anomaly_data["id"]]["message"],
+                "severity": ENHANCED_ANOMALIES[anomaly_data["id"]]["severity"],
                 "duration_remaining_sec": round(max(0, anomaly_data["end_time"] - sim_state_dict["total_simulated_time_sec"]), 2) if anomaly_data.get("end_time", 0) > 0 else "permanent"
             }
-            for anomaly_id, anomaly_data in sim_state_dict["active_anomalies"].items()
+            for anomaly_data in sim_state_dict["active_anomalies"]
         ],
         "strategy": {
             "current_strategy": sim_state_dict["pit_strategy"],
@@ -782,7 +837,7 @@ def generate_enhanced_telemetry_sim(sim_state_dict: dict):
     }
     return telemetry_data
 
-# --- Custom Tools for LangChain (adapted from ai_api.py & clearroute_agent_tools.py) ---
+# --- Custom Tools for LangChain ---
 
 @tool
 def get_latest_telemetry_tool() -> dict:
@@ -791,7 +846,6 @@ def get_latest_telemetry_tool() -> dict:
     This tool provides a snapshot of the current car, environmental,
     and competitor conditions.
     """
-    # This directly uses the simulator's logic and state
     return generate_enhanced_telemetry_sim(st.session_state.sim_state)
 
 @tool
@@ -806,8 +860,18 @@ def get_telemetry_history_tool(limit: int = 50) -> list[dict]:
     Returns:
         list[dict]: A list of telemetry data points, oldest first.
     """
-    # This now uses the history collected in Streamlit's session state
-    return list(st.session_state.performance_history)[-limit:] # Ensure it's a list
+    # Defensive check: Ensure performance_history exists and is a deque
+    if "performance_history" not in st.session_state:
+        st.session_state.performance_history = collections.deque(maxlen=st.session_state.get('telemetry_limit', 50))
+    elif not isinstance(st.session_state.performance_history, collections.deque):
+        st.session_state.performance_history = collections.deque(st.session_state.performance_history, maxlen=st.session_state.get('telemetry_limit', 50))
+    
+    # Ensure performance_history has a maxlen matching the telemetry_limit for consistency if it's dynamic
+    effective_limit = limit if limit is not None else st.session_state.get('telemetry_limit', 50)
+    if st.session_state.performance_history.maxlen != effective_limit:
+        st.session_state.performance_history = collections.deque(st.session_state.performance_history, maxlen=effective_limit)
+
+    return list(st.session_state.performance_history)[-effective_limit:]
 
 @tool
 def calculate_performance_metrics(telemetry_data: list) -> dict:
@@ -866,7 +930,6 @@ def calculate_performance_metrics(telemetry_data: list) -> dict:
         return metrics
 
     except Exception as e:
-        # traceback.print_exc() # Disable for Streamlit Cloud deployment
         return {"error": f"Failed to calculate metrics: {str(e)}", "data_points_analyzed": len(telemetry_data)}
 
 # Combine all tools into a list
@@ -917,15 +980,13 @@ try:
     if GROQ_API_KEY: # Check if key is available from secrets
         llm = ChatGroq(api_key=GROQ_API_KEY, model_name=LLM_MODEL_NAME, temperature=llm_temperature)
         llm_with_tools = llm.bind_tools(tools)
-        # print(f"✅ Groq LLM ({LLM_MODEL_NAME}) initialized successfully") # Disable print for Streamlit Cloud
     else:
         raise Exception("GROQ_API_KEY not found in Streamlit secrets.")
 except Exception as e:
-    # print(f"⚠️ Could not initialize Groq LLM: {e}") # Disable print for Streamlit Cloud
     st.error(f"LLM Initialization Error: {e}. AI analysis will use rule-based fallback.")
 
 
-# --- Enhanced Analysis Functions (from ai_api.py) ---
+# --- Enhanced Analysis Functions ---
 class TelemetryAnalyzer:
     def __init__(self):
         self.thresholds = TelemetryThresholds()
@@ -958,11 +1019,11 @@ class TelemetryAnalyzer:
         car_data = latest_data.get("car", {})
         current_fuel = car_data.get("fuel_level_liters", 0)
         consumption_rate = car_data.get("fuel_consumption_current_L_per_lap", self.race_context_defaults.base_fuel_consumption)
-        current_lap_num = car_data.get("lap_number", 1) # Renamed to avoid conflict with current_lap from sim_state
+        current_lap_num = car_data.get("lap_number", 1)
 
         remaining_laps = (current_fuel - self.race_context_defaults.safety_fuel_margin) / consumption_rate if consumption_rate > 0 else float('inf')
-        laps_since_pit = current_lap_num - car_data.get("last_pit_lap", 0) # Use lap_number for calculations
-        laps_to_pit = self.race_context_defaults.pit_window_laps - (laps_since_pit % self.race_context_defaults.pit_window_laps) # Correct calculation for laps to pit window
+        laps_since_pit = current_lap_num - car_data.get("last_pit_lap", 0)
+        laps_to_pit = self.race_context_defaults.pit_window_laps - (laps_since_pit % self.race_context_defaults.pit_window_laps)
 
         fuel_analysis = {
             "current_fuel": current_fuel,
@@ -973,7 +1034,7 @@ class TelemetryAnalyzer:
             "recommendations": []
         }
 
-        if remaining_laps < laps_to_pit and laps_to_pit < float('inf'): # Check against infinity
+        if remaining_laps < laps_to_pit and laps_to_pit < float('inf'):
             fuel_analysis["status"] = "critical"
             fuel_analysis["recommendations"].append(f"Fuel shortage risk: only {remaining_laps:.1f} laps remaining (pit window in {laps_to_pit} laps)")
         elif remaining_laps < laps_to_pit + 5 and laps_to_pit < float('inf'):
@@ -1016,15 +1077,12 @@ def generate_fallback_strategy(user_query: str, latest_telemetry: dict, anomaly_
     ])
     return "\n".join(strategy_parts)
 
-# --- Node Functions for LangGraph (adapted from ai_api.py) ---
+# --- Node Functions for LangGraph ---
 async def fetch_and_analyze_data_node(state: RaceBrainState):
     try:
-        # latest_data = get_latest_telemetry_tool()
-        latest_data = await get_latest_telemetry_tool.ainvoke({})
-        # history_data = get_telemetry_history_tool({"limit": 50}) # Use 50 for full history
-        history_data = await get_telemetry_history_tool.ainvoke({"limit": 50})
-        # metrics = calculate_performance_metrics({"telemetry_data": history_data})
-        metrics = calculate_performance_metrics.invoke({"telemetry_data": history_data})
+        latest_data = await get_latest_telemetry_tool.ainvoke({}) # Corrected tool invocation
+        history_data = await get_telemetry_history_tool.ainvoke({"limit": 50}) # Corrected tool invocation
+        metrics = calculate_performance_metrics.invoke({"telemetry_data": history_data}) # Corrected tool invocation
 
         return {
             "latest_telemetry": latest_data,
@@ -1033,6 +1091,7 @@ async def fetch_and_analyze_data_node(state: RaceBrainState):
             "messages": state["messages"]
         }
     except Exception as e:
+        st.error(f"Error in fetch_and_analyze_data_node: {e}")
         return {
             "latest_telemetry": {},
             "telemetry_history": [],
@@ -1201,7 +1260,7 @@ async def enhanced_anomaly_detection_node(state: RaceBrainState):
         }
 
     except Exception as e:
-        # traceback.print_exc()
+        st.error(f"Error in enhanced_anomaly_detection_node: {e}")
         return {
             "anomaly_report": {
                 "priority_level": "ERROR",
@@ -1249,7 +1308,7 @@ async def strategic_decision_node(state: RaceBrainState):
              3. **LONG-TERM OPTIMIZATION** - Manage resources for 24-hour duration
              4. **RISK MITIGATION** - Prevent race-ending failures
              5. **OPPORTUNITY EXPLOITATION** - Capitalize on competitor mistakes
-
+             
              CURRENT RACE SITUATION:
              - Session Time: {{session_time_val}}
              - Current Lap: {{current_lap_val}}
@@ -1259,18 +1318,18 @@ async def strategic_decision_node(state: RaceBrainState):
              - Weather: {{weather_val}}
              - Tire FL Temp: {{tire_temp_val}}
              - Competitor Gaps: {{competitor_gaps_val}}
-
+             
              ANOMALY ANALYSIS RESULTS:
              Priority: {{anomaly_priority_val}}
              Primary Issue: {{anomaly_primary_type_val}}
              Confidence: {{anomaly_confidence_val}}
              Reasoning: {{anomaly_reasoning_val}}
              Immediate Actions: {{anomaly_immediate_actions_val}}
-
+             
              PERFORMANCE TRENDS:
              Lap Time Trend: {{lap_trend_val}} (Avg: {{lap_avg_val:.2f}}s)
              Fuel Efficiency Trend: {{fuel_trend_val}} (Avg: {{fuel_avg_val:.2f}} L/lap)
-
+             
              Provide a comprehensive strategic recommendation covering:
              1. Current situation assessment
              2. Immediate actions needed (next 5-10 laps)
@@ -1278,9 +1337,9 @@ async def strategic_decision_node(state: RaceBrainState):
              4. Long-term considerations
              5. Risk mitigation measures
              6. Expected outcomes
-
+             
              Be specific and actionable in your recommendations.
-
+             
              **IMPORTANT: Your response MUST START with "<think> (internal thought process) </think>\\n\\n**" followed by "**STRATEGY RECOMMENDATION:**\\n\\n". Then provide the full structured recommendation. Include both the <think> block and the strategic recommendation.
              """),
             ("human", "Engineer Query: {user_query_val}\\n\\nProvide comprehensive strategic recommendations based on current race conditions.")
@@ -1346,7 +1405,7 @@ async def strategic_decision_node(state: RaceBrainState):
         }
 
     except Exception as e:
-        # traceback.print_exc()
+        st.error(f"Error in strategic_decision_node: {e}")
         fallback_strategy = f"Strategy generation encountered an error: {str(e)}. Please check system status and try again."
         return {
             "strategy_recommendation": fallback_strategy,
@@ -1655,13 +1714,11 @@ st.markdown("""
 
 
 # --- API Functions (Adapted for internal calls and state management) ---
-# @st.cache_data(ttl=1) # Removed caching as this function now updates sim_state
 def get_live_data():
     # Calling this directly triggers a simulation step and updates sim_state
     # This design means the simulation advances *every time Streamlit reruns*.
     # The `sim_speed_factor` controls how much simulated time passes per real-time Streamlit update.
-    # data = get_latest_telemetry_tool()
-    data = asyncio.run(get_latest_telemetry_tool.ainvoke({}))
+    data = asyncio.run(get_latest_telemetry_tool.ainvoke({})) # Correctly call the async tool
 
     if data and 'car' in data:
         # Check for driver change to reset stint info
@@ -1672,35 +1729,9 @@ def get_live_data():
             st.session_state.driver_stint_laps_start = data['car'].get('lap_number', 0)
         
         # Add current data point to performance history
-        performance_point = {
-            'timestamp_sec': data.get('timestamp_simulated_sec', time.time()),
-            'lap_time': data['car'].get('last_lap_time_sec', 0),
-            'speed': data['car'].get('speed_kmh', 0),
-            'fuel': data['car'].get('fuel_level_liters', 0),
-            'fuel_consumption': data['car'].get('fuel_consumption_current_L_per_lap', 0),
-            'tire_temp_FL_C': data['car'].get('tire_temp_FL_C', 0),
-            'tire_temp_FR_C': data['car'].get('tire_temp_FR_C', 0),
-            'tire_temp_RL_C': data['car'].get('tire_temp_RL_C', 0),
-            'tire_temp_RR_C': data['car'].get('tire_temp_RR_C', 0),
-            'tire_wear_FL_percent': data['car'].get('tire_wear_FL_percent', 0),
-            'tire_wear_FR_percent': data['car'].get('tire_wear_FR_percent', 0),
-            'tire_wear_RL_percent': data['car'].get('tire_wear_RL_percent', 0),
-            'tire_wear_RR_percent': data['car'].get('tire_wear_RR_percent', 0),
-            'oil_temp_C': data['car'].get('oil_temp_C', 0),
-            'water_temp_C': data['car'].get('water_temp_C', 0),
-            'brake_percent': data['car'].get('brake_percent', 0),
-            'suspension_travel_FL_mm': data['car'].get('suspension_travel_FL_mm', 0),
-            'suspension_travel_FR_mm': data['car'].get('suspension_travel_FR_mm', 0),
-            'suspension_travel_RL_mm': data['car'].get('suspension_travel_RL_mm', 0),
-            'suspension_travel_RR_mm': data['car'].get('suspension_travel_RR_mm', 0),
-            'throttle_percent': data['car'].get('throttle_percent', 0)
-        }
-        st.session_state.performance_history.append(performance_point)
-
-        max_history_points = st.session_state.get('telemetry_limit', 100)
-        if len(st.session_state.performance_history) > max_history_points:
-            st.session_state.performance_history.pop(0)
-
+        # `st.session_state.performance_history` is a deque with a maxlen, so append is sufficient.
+        st.session_state.performance_history.append(data)
+    
     return data
 
 def get_telemetry_history_ui(limit=50):
@@ -1712,8 +1743,8 @@ async def query_race_brain_ai_langgraph(user_query: str):
     try:
         initial_state = {
             "messages": [HumanMessage(content=user_query)],
-            "latest_telemetry": get_latest_telemetry_tool(), # Use the tool directly
-            "telemetry_history": get_telemetry_history_tool(st.session_state.telemetry_limit), # Use the tool directly with UI limit
+            "latest_telemetry": await get_latest_telemetry_tool.ainvoke({}), # Corrected tool invocation
+            "telemetry_history": await get_telemetry_history_tool.ainvoke({"limit": st.session_state.telemetry_limit}), # Corrected tool invocation
             "performance_metrics": {},
             "anomaly_report": {},
             "strategy_recommendation": "",
@@ -1734,7 +1765,6 @@ async def query_race_brain_ai_langgraph(user_query: str):
         }
         return ai_response
     except Exception as e:
-        # traceback.print_exc() # Don't print full trace in Streamlit Cloud console by default
         st.exception(e) # Display exception in Streamlit UI
         return {
             "strategy_recommendation": f"Error: AI processing failed: {str(e)}. Check Streamlit logs for full trace.",
@@ -1901,11 +1931,16 @@ with st.sidebar:
         refresh_interval = st.slider("Refresh Interval (sec)", 1, 10, 2)
         st.session_state.sim_speed_factor = st.slider("Simulator Speed Factor (X real-time)", 1, 60, st.session_state.sim_speed_factor, help="How many simulated seconds pass per real second.")
         show_debug = st.checkbox("Show Debug Info", False)
-        st.session_state.telemetry_limit = st.slider("Telemetry History Points", 20, 200, 50)
+        st.session_state.telemetry_limit = st.slider("Telemetry History Points", 20, 200, st.session_state.telemetry_limit)
 
         if st.button("Reset Simulator"):
             st.session_state.sim_state = _initial_simulator_state.copy() # Use the global initial state
-            st.session_state.performance_history = []
+            # Re-initialize performance_history after a full reset
+            st.session_state.performance_history = collections.deque(maxlen=st.session_state.telemetry_limit)
+            for _ in range(10): # Add 10 initial data points
+                initial_data_point = generate_enhanced_telemetry_sim(st.session_state.sim_state) # Pass updated sim_state
+                st.session_state.performance_history.append(initial_data_point)
+
             st.session_state.chat_history = []
             st.session_state.ai_response_cache = {
                 "strategy_recommendation": "AI could not generate a recommendation.",
@@ -2259,7 +2294,6 @@ with st.container():
         def handle_quick_query(query_text):
             st.session_state.ai_query_input_value = query_text
             with st.spinner("🧠 RACEBRAIN AI ANALYZING TELEMETRY DATA..."):
-                # Use asyncio.run for calling the async LangGraph function in a sync context
                 ai_output = asyncio.run(query_race_brain_ai_langgraph(query_text))
                 if ai_output:
                     st.session_state.ai_response_cache = ai_output
@@ -2482,8 +2516,8 @@ with st.container():
                 ))
             else:
                 fig.add_trace(go.Scatter(
-                    x=np.arange(st.session_state.telemetry_limit),
-                    y=np.random.normal(95, 3, st.session_state.telemetry_limit),
+                    x=np.arange(len(df_hist_current)), # Use df length as x-axis if no timestamp_sec
+                    y=np.random.normal(95, 3, len(df_hist_current)),
                     name="Oil Temp",
                     line=dict(color='#FF6B35')
                 ))
@@ -2497,8 +2531,8 @@ with st.container():
                 ))
             else:
                  fig.add_trace(go.Scatter(
-                    x=np.arange(st.session_state.telemetry_limit),
-                    y=np.random.normal(85, 2, st.session_state.telemetry_limit),
+                    x=np.arange(len(df_hist_current)),
+                    y=np.random.normal(85, 2, len(df_hist_current)),
                     name="Water Temp",
                     line=dict(color='#1E88E5')
                 ))
@@ -2515,6 +2549,7 @@ with st.container():
             st.plotly_chart(fig, use_container_width=True, key=f"tech_engine_temps_chart_{st.session_state.chart_counter}")
                 
         with tech_chart_col2:
+            df_hist_current = pd.DataFrame(st.session_state.performance_history)
             fig = go.Figure()
 
             suspension_cols = ['suspension_travel_FL_mm', 'suspension_travel_FR_mm', 'suspension_travel_RL_mm', 'suspension_travel_RR_mm']
@@ -2524,10 +2559,11 @@ with st.container():
                 fig.add_trace(go.Scatter(x=df_hist_current['timestamp_sec'], y=df_hist_current['suspension_travel_RL_mm'], name="Rear Left", line=dict(color='#4CAF50')))
                 fig.add_trace(go.Scatter(x=df_hist_current['timestamp_sec'], y=df_hist_current['suspension_travel_RR_mm'], name="Rear Right", line=dict(color='#FFC107')))
             else:
-                fig.add_trace(go.Scatter(x=np.arange(st.session_state.telemetry_limit), y=np.random.normal(45, 5, st.session_state.telemetry_limit), name="Front Left", line=dict(color='#FF6B35')))
-                fig.add_trace(go.Scatter(x=np.arange(st.session_state.telemetry_limit), y=np.random.normal(42, 4, st.session_state.telemetry_limit), name="Front Right", line=dict(color='#1E88E5')))
-                fig.add_trace(go.Scatter(x=np.arange(st.session_state.telemetry_limit), y=np.random.normal(38, 3, st.session_state.telemetry_limit), name="Rear Left", line=dict(color='#4CAF50')))
-                fig.add_trace(go.Scatter(x=np.arange(st.session_state.telemetry_limit), y=np.random.normal(40, 4, st.session_state.telemetry_limit), name="Rear Right", line=dict(color='#FFC107')))
+                current_len = len(df_hist_current)
+                fig.add_trace(go.Scatter(x=np.arange(current_len), y=np.random.normal(45, 5, current_len), name="Front Left", line=dict(color='#FF6B35')))
+                fig.add_trace(go.Scatter(x=np.arange(current_len), y=np.random.normal(42, 4, current_len), name="Front Right", line=dict(color='#1E88E5')))
+                fig.add_trace(go.Scatter(x=np.arange(current_len), y=np.random.normal(38, 3, current_len), name="Rear Left", line=dict(color='#4CAF50')))
+                fig.add_trace(go.Scatter(x=np.arange(current_len), y=np.random.normal(40, 4, current_len), name="Rear Right", line=dict(color='#FFC107')))
 
             fig.update_layout(
                 title="SUSPENSION TRAVEL ANALYSIS",
@@ -2542,7 +2578,8 @@ with st.container():
 
             st.markdown("---")
             st.subheader("🛑 BRAKE & THROTTLE ANALYSIS")
-                    
+            
+            df_hist_current = pd.DataFrame(st.session_state.performance_history) # Re-read to ensure fresh data for second chart block
             fig = go.Figure()
             if not df_hist_current.empty and 'throttle_percent' in df_hist_current.columns and 'brake_percent' in df_hist_current.columns and df_hist_current['throttle_percent'].any() and df_hist_current['brake_percent'].any():
                 fig.add_trace(go.Scatter(
@@ -2558,15 +2595,16 @@ with st.container():
                     line=dict(color='#F44336')
                     ))
             else:
+                current_len = len(df_hist_current)
                 fig.add_trace(go.Scatter(
-                    x=np.arange(st.session_state.telemetry_limit),
-                    y=np.random.uniform(0, 100, st.session_state.telemetry_limit),
+                    x=np.arange(current_len),
+                    y=np.random.uniform(0, 100, current_len),
                     name="Throttle",
                     line=dict(color='#4CAF50')
                 ))
                 fig.add_trace(go.Scatter(
-                    x=np.arange(st.session_state.telemetry_limit),
-                    y=np.random.uniform(0, 100, st.session_state.telemetry_limit),
+                    x=np.arange(current_len),
+                    y=np.random.uniform(0, 100, current_len),
                     name="Brake",
                     line=dict(color='#F44336')
                     ))
@@ -2817,11 +2855,11 @@ with st.container():
                             </div>
                             <div>
                                 <div style="font-size: 0.9rem; opacity: 0.8;">Ambient Temp</div>
-                                <div style="font-size: 1.2rem; font-weight: 700;">{race_control_data['environmental'].get('ambient_temp_C', 'N/A')}°C</div>
+                                <div style="font-size: 1.5rem; font-weight: 700;">{race_control_data['environmental'].get('ambient_temp_C', 'N/A')}°C</div>
                             </div>
                             <div>
                                 <div style="font-size: 0.9rem; opacity: 0.8;">Track Temp</div>
-                                <div style="font-size: 1.2rem; font-weight: 700;">{race_control_data['environmental'].get('track_temp_C', 'N/A')}°C</div>
+                                <div style="font-size: 1.5rem; font-weight: 700;">{race_control_data['environmental'].get('track_temp_C', 'N/A')}°C</div>
                             </div>
                             <div>
                                 <div style="font-size: 0.9rem; opacity: 0.8;">Track Grip</div>
@@ -2851,7 +2889,7 @@ with st.container():
             df_competitors = pd.DataFrame(competitors)
             
             def highlight_our_car(s):
-                if s['name'] == OUR_CAR_CONFIG["name"]: # Use our_car_config for highlighting
+                if s['name'] == OUR_CAR_CONFIG["name"]:
                     return ['background-color: rgba(255, 107, 53, 0.2); font-weight: bold; color: white;'] * len(s)
                 return [''] * len(s)
 

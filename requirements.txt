@@ -6,6 +6,7 @@ pandas
 plotly
 numpy
 scipy
+nest_asyncio
 aiohappyeyeballs==2.6.1
 aiohttp==3.12.13
 aiosignal==1.3.2
