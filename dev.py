@@ -1,4 +1,10 @@
 import streamlit as st
+import os
+os.environ["STREAMLIT_DEBUG"] = "true"
+
+import streamlit as st
+import json
+
 import json
 import time
 import pandas as pd
